@@ -1,4 +1,4 @@
-# Airfoils
+# Airfiles
 
 **Transfer files on the M5Stack CardputerZero from an iPhone, Android SmartPhone or any computer.**
 

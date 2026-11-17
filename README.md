@@ -1,6 +1,6 @@
 # Airfiles
 
-**Receive files on the M5Stack CardputerZero from an iPhone, Android phone or any computer.**
+**Network transfer file on the M5Stack CardputerZero from an iPhone, Android phone or any computer.**
 
 Airfiles puts a QR code and a PIN on the CardputerZero's 320x170 screen. Scan the
 code with a phone, pick files in the browser, and they land in `~/Airfiles` on the

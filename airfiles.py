@@ -36,7 +36,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from PIL import Image, ImageDraw, ImageFont
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 W, H = 320, 170
 
 BG = (8, 12, 20)
@@ -153,9 +153,18 @@ class App:
         self.say(f"Port set to {port}")
         return True
 
+    def set_max_mb(self, mb):
+        """Change the per-file upload limit and remember it."""
+        self.cfg["max_mb"] = int(mb)
+        save_config_value("max_mb", int(mb))
+        self.say(f"Limit set to {int(mb)} MB")
+
     def say(self, text, secs=4):
         self.toast = (text, time.time() + secs)
         self.dirty.set()
+
+
+MAX_LIMIT_MB = 102400          # 100 GB: the biggest per-file limit you can set
 
 
 def new_pin():
@@ -567,7 +576,8 @@ class AirDrop:
 
 
 # ------------------------------------------------------------ file browser
-MENU_LINK, MENU_AIRDROP, MENU_DELETE = "Download link", "AirDrop send", "Delete"
+MENU_LINK, MENU_AIRDROP, MENU_RENAME, MENU_DELETE = (
+    "Download link", "AirDrop send", "Rename", "Delete")
 
 
 def in_dir(path, root):
@@ -633,7 +643,7 @@ def go_up(app, ui):
 
 def open_menu(app, ui, path):
     ui.target = Path(path)
-    ui.menu_items = [MENU_LINK, MENU_AIRDROP]
+    ui.menu_items = [MENU_LINK, MENU_AIRDROP, MENU_RENAME]
     if in_dir(path, app.inbox):
         ui.menu_items.append(MENU_DELETE)
     ui.menu_sel, ui.note, ui.confirm_delete, ui.fmode = 0, "", False, "menu"
@@ -661,6 +671,16 @@ def run_menu(app, ui, sender):
             sender.discover(ui)
         else:
             ui.note = why
+    elif item == MENU_RENAME:
+        if not ui.target.is_file():
+            ui.note = "File is gone"
+        else:
+            name = ui.target.name
+            suffix = Path(name).suffix
+            ui.rn_text, ui.rn_msg = name, ""
+            # start the cursor before the extension so ".jpg" is kept by default
+            ui.rn_cur = len(name) - len(suffix) if 0 < len(suffix) < len(name) else len(name)
+            ui.fmode = "rename"
     elif item == MENU_DELETE:
         if not in_dir(ui.target, app.inbox):
             ui.note = "Only inbox files can be deleted"
@@ -681,7 +701,7 @@ def files_back(ui):
         return
     if ui.fmode == "sending" and ui.proc and ui.proc.poll() is None:
         ui.proc.terminate()                    # cancel the transfer
-    ui.fmode = "menu" if ui.fmode in ("share", "pick", "sending") else "browse"
+    ui.fmode = "menu" if ui.fmode in ("share", "pick", "sending", "rename") else "browse"
 
 
 def files_key(app, ui, airdrop, action):
@@ -710,6 +730,8 @@ def files_key(app, ui, airdrop, action):
             ui.confirm_delete = False
         elif action == "enter":
             run_menu(app, ui, airdrop.sender)
+    elif ui.fmode == "rename":
+        rename_key(app, ui, action)
     elif ui.fmode == "pick":
         if action == "up":
             ui.ad_sel = max(0, ui.ad_sel - 1)
@@ -718,6 +740,72 @@ def files_key(app, ui, airdrop, action):
         elif action == "enter" and ui.ad_receivers:
             rid, rname = ui.ad_receivers[ui.ad_sel]
             airdrop.sender.send(ui, rid, rname, ui.target)
+
+
+def check_name(name):
+    """Return a problem description for an unusable file name, or ''."""
+    if not name:
+        return "Name can't be empty"
+    if name in (".", ".."):
+        return "Invalid name"
+    if name.startswith("."):
+        return "Name can't start with a dot"
+    if "/" in name or "\0" in name:
+        return "No / in names"
+    if len(name.encode("utf-8")) > 255:
+        return "Name is too long"
+    return ""
+
+
+def rename_key(app, ui, action):
+    t = ui.rn_text
+    if action.startswith("char:"):
+        if len(t) < 255:
+            ui.rn_text = t[:ui.rn_cur] + action[5:] + t[ui.rn_cur:]
+            ui.rn_cur += 1
+        ui.rn_msg = ""
+    elif action == "backspace":
+        if ui.rn_cur > 0:
+            ui.rn_text = t[:ui.rn_cur - 1] + t[ui.rn_cur:]
+            ui.rn_cur -= 1
+        ui.rn_msg = ""
+    elif action == "left":
+        ui.rn_cur = max(0, ui.rn_cur - 1)
+    elif action == "right":
+        ui.rn_cur = min(len(t), ui.rn_cur + 1)
+    elif action == "enter":
+        do_rename(app, ui)
+
+
+def do_rename(app, ui):
+    old, new = ui.target, ui.rn_text.strip()
+    if new == old.name:
+        ui.fmode = "browse"                    # nothing to do
+        return
+    problem = check_name(new)
+    if problem:
+        ui.rn_msg = problem
+        return
+    dest = old.with_name(new)
+    if dest.exists() and not dest.samefile(old):
+        ui.rn_msg = "That name already exists"
+        return
+    try:
+        os.rename(old, dest)
+    except OSError as e:
+        ui.rn_msg = clip(e.strerror or "Rename failed", 30)
+        return
+    for share in app.shares.values():          # keep existing download links working
+        if Path(share["path"]) == old:
+            share["path"] = str(dest)
+    app.files = scan_inbox(app)
+    ui.fmode, ui.target = "browse", dest
+    refresh_files(app, ui)
+    for i, entry in enumerate(ui.f_entries):
+        if entry[0] == new:
+            ui.f_sel = i
+            break
+    app.say(f"Renamed to {clip(new, 20)}")
 
 
 FOUND = re.compile(r"Found\s+index\s+(\d+)\s+ID\s+(\S+)\s+name\s+(.+?)\s*$")
@@ -882,8 +970,12 @@ class UI:
         self.port_text = ""
         self.port_fresh = False
         self.port_msg = ""
+        # rename editor
+        self.rn_text = ""
+        self.rn_cur = 0
+        self.rn_msg = ""
         # Files browser
-        self.fmode = "browse"        # browse | menu | share | pick | sending
+        self.fmode = "browse"        # browse | menu | rename | share | pick | sending
         self.f_dir = None
         self.f_sel = 0
         self.f_entries = []
@@ -953,6 +1045,22 @@ def draw_menu(d, ui):
 
 
 def render_files(d, app, ui):
+    if ui.fmode == "rename":
+        d.text((5, 21), "Rename", fill=ACC, font=font(11, True))
+        d.text((5, 37), "was: " + clip(ui.target.name, 40), fill=DIM, font=font(9))
+        d.rectangle((5, 52, W - 5, 78), outline=ACC)
+        f = font(12)
+        cw = f.getlength("M")
+        n = max(8, int((W - 26) / cw))
+        start = max(0, ui.rn_cur - (n - 2)) if len(ui.rn_text) >= n else 0
+        d.text((11, 57), ui.rn_text[start:start + n - 1], fill=FG, font=f)
+        cx = 11 + f.getlength(ui.rn_text[start:ui.rn_cur])
+        d.line((cx, 55, cx, 75), fill=ACC)
+        if ui.rn_msg:
+            d.text((W // 2, 92), clip(ui.rn_msg, 40), fill=WARN, font=font(10, True), anchor="mm")
+        d.text((5, H - 3), "Enter save  Esc cancel  Left/Right move", fill=DIM,
+               font=font(9), anchor="ls")
+        return
     if ui.fmode == "share":
         draw_qr(d, ui.share_url, 186, 22, 130)
         d.text((5, 22), "Scan to download", fill=ACC, font=font(11, True))
@@ -1028,15 +1136,23 @@ def render(app, ui):
         draw_exit_overlay(d, app)
         return img
 
-    if ui.view == "port":
-        d.text((W // 2, 34), "Web server port", fill=DIM, font=font(11), anchor="mm")
+    if ui.view in ("port", "limit"):
+        limit = ui.view == "limit"
+        maxlen = 6 if limit else 5
+        title = "Max file size per upload (MB)" if limit else "Web server port"
+        hint = ("default 2048   range 1-%d" % MAX_LIMIT_MB if limit
+                else "default 8088   range 1024-65535")
+        d.text((W // 2, 34), title, fill=DIM, font=font(11), anchor="mm")
         d.rectangle((90, 48, 230, 82), outline=ACC)
-        shown = ui.port_text + ("_" if len(ui.port_text) < 5 else "")
+        shown = ui.port_text + ("_" if len(ui.port_text) < maxlen else "")
         d.text((W // 2, 65), shown, fill=FG, font=font(20, True), anchor="mm")
-        d.text((W // 2, 98), "default 8088   range 1024-65535", fill=DIM,
-               font=font(9), anchor="mm")
+        if limit and ui.port_text.isdigit() and int(ui.port_text) > 0:
+            d.text((W // 2, 92), "= " + human(int(ui.port_text) * 1048576) + " per file",
+                   fill=DIM, font=font(10), anchor="mm")
+        d.text((W // 2, 106 if limit else 98), hint, fill=DIM, font=font(9), anchor="mm")
         if ui.port_msg:
-            d.text((W // 2, 116), ui.port_msg, fill=WARN, font=font(10, True), anchor="mm")
+            d.text((W // 2, 122 if limit else 116), ui.port_msg, fill=WARN,
+                   font=font(10, True), anchor="mm")
         d.text((5, H - 3), "0-9 type  Enter save  Esc back", fill=DIM,
                font=font(9), anchor="ls")
         draw_exit_overlay(d, app)
@@ -1104,7 +1220,7 @@ def render(app, ui):
         if not app.files:
             d.text((5, y), "Waiting for files...", fill=DIM, font=font(10))
     d.text((5, H - 14), "i inbox  f files  p port", fill=DIM, font=font(9), anchor="ls")
-    d.text((5, H - 3), "a airdrop  r pin", fill=DIM, font=font(9), anchor="ls")
+    d.text((5, H - 3), "a airdrop  r pin  l limit", fill=DIM, font=font(9), anchor="ls")
     d.text((W - 5, H - 3), "hold esc 3s: exit", fill=DIM, font=font(9), anchor="rs")
     draw_exit_overlay(d, app)
     return img
@@ -1151,7 +1267,7 @@ KEYMAP = {
     "KEY_UP": "up", "KEY_SEMICOLON": "up",
     "KEY_DOWN": "down", "KEY_DOT": "down",
     "KEY_D": "delete", "KEY_DELETE": "backspace", "KEY_BACKSPACE": "backspace",
-    "KEY_A": "airdrop", "KEY_R": "pin", "KEY_P": "port",
+    "KEY_A": "airdrop", "KEY_R": "pin", "KEY_P": "port", "KEY_L": "limit",
     "KEY_ENTER": "enter", "KEY_KPENTER": "enter",
     "KEY_F": "files", "KEY_COMMA": "left", "KEY_SLASH": "right",
     "KEY_LEFT": "left", "KEY_RIGHT": "right",
@@ -1159,6 +1275,41 @@ KEYMAP = {
 for _i in range(10):
     KEYMAP[f"KEY_{_i}"] = f"digit{_i}"
     KEYMAP[f"KEY_KP{_i}"] = f"digit{_i}"
+
+
+# Typing in the rename editor: evdev key name -> (plain, shifted)
+CHARS = {f"KEY_{c.upper()}": (c, c.upper()) for c in "abcdefghijklmnopqrstuvwxyz"}
+CHARS.update({f"KEY_{i}": (str(i), ")!@#$%^&*("[i]) for i in range(10)})
+CHARS.update({
+    "KEY_SPACE": (" ", " "), "KEY_MINUS": ("-", "_"), "KEY_EQUAL": ("=", "+"),
+    "KEY_DOT": (".", ">"), "KEY_COMMA": (",", "<"), "KEY_SEMICOLON": (";", ":"),
+    "KEY_APOSTROPHE": ("'", '"'), "KEY_LEFTBRACE": ("[", "{"), "KEY_RIGHTBRACE": ("]", "}"),
+    "KEY_SLASH": ("/", "?"), "KEY_BACKSLASH": ("\\", "|"),
+})
+
+
+def translate_key(ui, name, shift=False):
+    """Turn a raw key name into an action. In the rename editor letters and
+    punctuation become 'char:<c>' instead of commands like quit or inbox."""
+    if ui.view == "files" and ui.fmode == "rename":
+        if name in ("KEY_BACKSPACE", "KEY_DELETE"):
+            return "backspace"
+        if name in ("KEY_ENTER", "KEY_KPENTER"):
+            return "enter"
+        if name == "KEY_LEFT":
+            return "left"
+        if name == "KEY_RIGHT":
+            return "right"
+        pair = CHARS.get(name)
+        return "char:" + pair[1 if shift else 0] if pair else None
+    return KEYMAP.get(name)
+
+
+def repeatable(ui, action):
+    """Which actions auto-repeat while a key is held."""
+    if action in ("up", "down", "backspace"):
+        return True
+    return ui.view == "files" and ui.fmode == "rename" and action in ("left", "right")
 
 
 def esc_progress(app, hold, now=None):
@@ -1206,6 +1357,7 @@ def keyboard_thread(q, stop, app=None, esc_names=(), hold=3.0):
         dev.grab()           # keep the launcher from reacting to the same keys
     except OSError:
         pass
+    shift = False
     try:
         for ev in dev.read_loop():
             if stop.is_set():
@@ -1213,12 +1365,15 @@ def keyboard_thread(q, stop, app=None, esc_names=(), hold=3.0):
             if ev.type == ecodes.EV_KEY and ev.value in (0, 1, 2):
                 name = ecodes.KEY.get(ev.code)
                 name = name[0] if isinstance(name, list) else name
+                if name in ("KEY_LEFTSHIFT", "KEY_RIGHTSHIFT"):
+                    shift = ev.value != 0
+                    continue
                 if name in esc_names:
                     if app is not None and ev.value in (0, 1):
                         esc_event(app, q, ev.value, hold)
                     continue
-                if name in KEYMAP and ev.value and (ev.value == 1 or KEYMAP[name] in ("up", "down", "backspace")):
-                    q.put(KEYMAP[name])
+                if ev.value in (1, 2):
+                    q.put((name, shift, ev.value == 2))   # translated in the main loop
     finally:
         try:
             dev.ungrab()
@@ -1227,10 +1382,12 @@ def keyboard_thread(q, stop, app=None, esc_names=(), hold=3.0):
 
 
 def edit_port(app, ui, action):
+    """Number editor shared by the port (view 'port') and size limit ('limit')."""
+    limit = ui.view == "limit"
     if action.startswith("digit"):
         if ui.port_fresh:
             ui.port_text, ui.port_fresh = "", False
-        if len(ui.port_text) < 5:
+        if len(ui.port_text) < (6 if limit else 5):
             ui.port_text += action[5:]
         ui.port_msg = ""
     elif action == "backspace":
@@ -1240,7 +1397,15 @@ def edit_port(app, ui, action):
         try:
             n = int(ui.port_text)
         except ValueError:
-            ui.port_msg = "type a port number"
+            ui.port_msg = "type a number"
+            return
+        if limit:
+            if not 1 <= n <= MAX_LIMIT_MB:
+                ui.port_msg = f"use 1 - {MAX_LIMIT_MB}"
+            else:
+                if n != int(app.cfg["max_mb"]):
+                    app.set_max_mb(n)
+                ui.view = "home"
             return
         if not 1024 <= n <= 65535:
             ui.port_msg = "use 1024 - 65535"
@@ -1268,11 +1433,11 @@ def handle_key(app, ui, airdrop, action):
         if ui.view == "files":
             files_back(ui)
             return True
-        if ui.view in ("inbox", "port"):
+        if ui.view in ("inbox", "port", "limit"):
             ui.view = "home"
             return True
         return False
-    if ui.view == "port":
+    if ui.view in ("port", "limit"):
         edit_port(app, ui, action)
         return True
     if ui.view == "files":
@@ -1282,6 +1447,9 @@ def handle_key(app, ui, airdrop, action):
         open_files(app, ui)
     elif action == "port":
         ui.view, ui.port_text, ui.port_fresh, ui.port_msg = "port", str(app.port), True, ""
+    elif action == "limit":
+        ui.view, ui.port_text, ui.port_fresh, ui.port_msg = (
+            "limit", str(app.cfg["max_mb"]), True, "")
     elif action == "inbox":
         ui.view = "home" if ui.view == "inbox" else "inbox"
     elif action == "up":
@@ -1331,7 +1499,9 @@ def preview_ui(app, mode):
         ui.view, ui.port_text, ui.port_fresh = "port", "8088", True
     elif mode == "exiting":
         app.esc_since = time.monotonic() - 1.6
-    elif mode in ("files", "menu", "share", "pick", "sending"):
+    elif mode == "limit":
+        ui.view, ui.port_text, ui.port_fresh = "limit", "2048", True
+    elif mode in ("files", "menu", "rename", "share", "pick", "sending"):
         root = Path(tempfile.mkdtemp(prefix="airfiles-demo-"))
         for folder in ("Airfiles", "Documents", "Music", "Pictures"):
             (root / folder).mkdir()
@@ -1353,7 +1523,9 @@ def preview_ui(app, mode):
             enter_dir(app, ui, root)
         else:
             open_menu(app, ui, root / "Airfiles" / "IMG_2041.HEIC")
-        if mode == "share":
+        if mode == "rename":
+            ui.fmode, ui.rn_text, ui.rn_cur = "rename", "IMG_2041.HEIC", 8
+        elif mode == "share":
             ui.share_url, ui.share_until = app.share_link(ui.target)
             ui.fmode = "share"
         elif mode == "pick":
@@ -1421,6 +1593,11 @@ def main():
                     action = keys.get_nowait()
                 except queue.Empty:
                     break
+                if isinstance(action, tuple):            # raw key from the keyboard thread
+                    name, shift, repeat = action
+                    action = translate_key(ui, name, shift)
+                    if action is None or (repeat and not repeatable(ui, action)):
+                        continue
                 running = handle_key(app, ui, airdrop, action) and running
             if esc_progress(app, float(cfg["exit_hold_s"])) >= 1.0:
                 running = False

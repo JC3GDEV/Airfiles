@@ -1,6 +1,6 @@
 # Airfiles
 
-**Transfer files on the M5Stack CardputerZero from an iPhone, Android SmartPhone or any computer.**
+**Receive files on the M5Stack CardputerZero from an iPhone, Android phone or any computer.**
 
 Airfiles puts a QR code and a PIN on the CardputerZero's 320x170 screen. Scan the
 code with a phone, pick files in the browser, and they land in `~/Airfiles` on the
@@ -25,6 +25,11 @@ Windows, macOS, Linux and `curl`.
   <img src="docs/screenshots/pick.png" width="320" alt="Choosing an AirDrop receiver">
 </p>
 
+<p align="center">
+  <img src="docs/screenshots/rename.png" width="320" alt="Renaming a file">
+  <img src="docs/screenshots/limit.png" width="320" alt="Per-file size limit setting">
+</p>
+
 > The images are renders of the app's real 320x170 framebuffer output (shown at 3x),
 
 ## Features
@@ -33,7 +38,8 @@ Windows, macOS, Linux and `curl`.
 - **Any client:** a plain browser page, `curl`, or iOS Shortcuts. Nothing to install on the sender.
 - **PIN protected:** the QR link carries a random 4-digit PIN. Ten wrong PINs from one address lock it out for a minute.
 - **Safe file handling:** names are sanitised (no path tricks, no hidden files), duplicates become `name-1.ext`, partial uploads are never left in the inbox, and a size limit and free-space check apply.
-- **Files browser:** press `f` to browse the device from your home folder down. Open any file to get a **download link with a QR code** (for a phone or computer) or to **send it by AirDrop (beta)**. Files in the inbox can also be deleted.
+- **Files browser:** press `f` to browse the device from your home folder down. Open any file to get a **download link with a QR code** (for a phone or computer), **send it by AirDrop (beta)**, or **rename** it. Files in the inbox can also be deleted.
+- **Per-file size limit:** uploads larger than the limit are refused with a clear error. The default is 2048 MB; change it on the device (press `l`) from 1 MB to 100 GB. It is remembered.
 - **Configurable port:** default `8088`, changeable on the device (press `p`) and remembered.
 - **Built for the small screen:** 320x170 framebuffer UI, keyboard-only control, hold Esc for 3 s to exit.
 - **Experimental AirDrop:** optional, off by default, via OWL + OpenDrop (see below).
@@ -59,7 +65,9 @@ Open **Airfiles** from APPLaunch, or run `airfiles` from an SSH session.
 **Build it yourself** (any Linux machine with `dpkg-deb`, no cross-compiler needed):
 
 ```sh
-MAINTAINER="Your Name <you@example.com>" bash build-deb.sh   # writes dist/airfiles_<version>_arm64.deb
+bash build-deb.sh   # writes dist/airfiles_<version>_arm64.deb
+# the package Maintainer is "JackyC <iphone3gdevteam@gmail.com>"; override with
+# MAINTAINER="Name <email>" bash build-deb.sh
 ```
 
 **Run from source** (no install):
@@ -85,8 +93,18 @@ python3 airfiles.py
      the file. The link works for 10 minutes (`share_minutes`) and still needs the PIN, which is inside the link.
    - **AirDrop send (beta)** looks for nearby Apple devices and sends the file to the one you pick.
      AirDrop must be switched on first (see below).
+   - **Rename** opens a text editor with the current name. The cursor starts before the extension, so
+     typing a new name keeps `.jpg`. Type with the keyboard (Shift for capitals), `Backspace` deletes, `Left`/`Right`
+     move, `Enter` saves, `Esc` cancels. An existing name is never overwritten, and names starting with a dot
+     or containing `/` are refused. Download links created earlier keep working after a rename.
    - **Delete** appears for files in the inbox only and asks for a second `Enter`.
 3. `Esc` steps back one level; `q` goes back to the home screen.
+
+### Limit the size of uploads
+
+Press `l` on the home screen, type the limit in megabytes (1 to 102400) and press `Enter`. It applies to each
+file, takes effect immediately for new uploads, and is saved as `max_mb` in the config file. The upload page
+also refuses oversize files before sending them. The device's free space is still checked on top of this.
 
 ### From the command line
 
@@ -125,9 +143,11 @@ Every request needs the PIN as `?pin=1234` or an `X-Pin` header. Responses use o
 | in Files: `;` / `.` | move up / down |
 | in Files: `Enter` or `/` | open a folder, or the menu for a file |
 | in Files: `,` or `Backspace` | up one folder |
+| in Rename: type, `Backspace`, `Left`/`Right`, `Enter` saves, `Esc` cancels | edit the file name |
 | `;` or `Up`, `.` or `Down` | move in the inbox |
 | `d` (press twice) or `Backspace` | delete the selected file |
 | `p` | change the web port (type digits, `Enter` saves) |
+| `l` | set the per-file size limit in MB (type digits, `Enter` saves) |
 | `r` | generate a new PIN |
 | `a` | toggle AirDrop (experimental) |
 | `Esc` (tap) | go back |
@@ -147,7 +167,7 @@ Changing the port from the app writes `"port"` here for you.
 | `port` | `8088` | web server port (1024-65535) |
 | `inbox` | `~/Airfiles` | where received files are saved |
 | `pin` | `true` | require a PIN |
-| `max_mb` | `2048` | per-file size limit |
+| `max_mb` | `2048` | per-file upload size limit in MB (1-102400); change it in the app with `l` |
 | `airdrop` | `false` | start OWL + OpenDrop at launch |
 | `airdrop_iface` | `wlan1` | Wi-Fi adapter OWL may take over |
 | `fb` | `/dev/fb0` | framebuffer device |
@@ -210,7 +230,7 @@ to and from a phone.
 ## Development
 
 ```sh
-python3 -m unittest -v                    # 48 tests: server, PIN, uploads, port, Esc hold, Files, links, AirDrop send
+python3 -m unittest -v                    # 69 tests: server, PIN, uploads, port, size limit, Esc hold, Files, rename, links, AirDrop send
 python3 airfiles.py --headless --port 9000     # run the server without a device
 python3 tools/make_screenshots.py         # regenerate docs/screenshots (QR needs python3-qrcode or reportlab)
 python3 tools/make_icon.py 64 assets/airfiles.png
@@ -236,7 +256,7 @@ M5Stack's `czdev publish --deb <file>` (see their
 
 ## Status
 
-- The web server, PIN lockout, file handling, port editor, Esc-hold exit, Files browser, download links,
+- The web server, PIN lockout, file handling, port editor, size limit, Esc-hold exit, Files browser, rename, download links,
   AirDrop send (against a fake `opendrop`) and screen rendering are covered by automated tests, and the QR code drawn on screen has been checked to decode to the
   right address.
 - **Not yet confirmed on real hardware:** how APPLaunch hands over the screen and keyboard to an

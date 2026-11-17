@@ -5,14 +5,15 @@
 #
 # Usage: ./build-deb.sh
 # Env:   VERSION     default: VERSION in airfiles.py
-#        MAINTAINER  "Name <email>" (the app store checks for an email)
+#        MAINTAINER  "Name <email>" for the package Maintainer field
+#                    (APP_MAINTAINER works too; default: JackyC <iphone3gdevteam@gmail.com>)
 #        OUT_DIR     where the .deb goes (default: ./dist)
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PKG="airfiles"
 VERSION="${VERSION:-$(sed -n 's/^VERSION = "\(.*\)"/\1/p' "$HERE/airfiles.py")}"
-MAINTAINER="${MAINTAINER:-Your Name <you@example.com>}"
+MAINTAINER="${MAINTAINER:-${APP_MAINTAINER:-JackyC <iphone3gdevteam@gmail.com>}}"
 OUT_DIR="${OUT_DIR:-$HERE/dist}"
 mkdir -p "$OUT_DIR"
 
@@ -55,7 +56,8 @@ computer on the same network, enter nothing else (the PIN is in the link), pick
 files. Files land in ~/Airfiles.
 
 Press f for the Files browser: open a file to get a download link (QR code) or to
-send it by AirDrop (beta). Press p to change the port, q or hold Esc to exit.
+send it by AirDrop (beta), or rename it. Press p to change the port, l to set the
+per-file size limit, q or hold Esc to exit.
 
 Command line:  curl -T photo.jpg "http://<ip>:8088/upload/photo.jpg?pin=<pin>"
 
